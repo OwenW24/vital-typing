@@ -1,5 +1,7 @@
 # vital-type
 
+![vital-type in latte, frappe, macchiato, and mocha themes](assets/themes.png)
+
 Terminal quote typing trainer. Records words per minute and accuracy. Theme and pacing are configurable.
 
 **Requirements:** Python 3 and a terminal. Linux or macOS recommended.
