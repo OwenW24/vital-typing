@@ -196,7 +196,8 @@ def write_json(path, data):
 
 def ensure_default_data():
     ensure_data_dir()
-    write_json(WORDS_PATH, DEFAULT_QUOTES)
+    if not os.path.exists(WORDS_PATH):
+        write_json(WORDS_PATH, DEFAULT_QUOTES)
     if not os.path.exists(CONFIG_PATH):
         write_json(
             CONFIG_PATH,
@@ -283,6 +284,22 @@ def load_words():
     except Exception:
         pass
     return {k: v.copy() for k, v in DEFAULT_QUOTES.items()}
+
+
+def save_words(quotes):
+    write_json(WORDS_PATH, quotes)
+
+
+def normalize_category_name(name):
+    return " ".join(name.strip().lower().split())
+
+
+def resolve_category_name(categories, name):
+    normalized = normalize_category_name(name)
+    for category in categories:
+        if category.lower() == normalized:
+            return category
+    return normalized
 
 
 def load_stats():
@@ -592,6 +609,14 @@ def is_up(key):
 
 def is_down(key):
     return key == "KEY_DOWN"
+
+
+def is_left(key):
+    return key == "KEY_LEFT"
+
+
+def is_right(key):
+    return key == "KEY_RIGHT"
 
 
 def menu_next(key, selected, count):
@@ -989,6 +1014,290 @@ def prompt_confirm(stdscr, title, detail):
             return True
 
 
+def prompt_text(stdscr, title, hint="", max_length=500, initial=""):
+    text = initial
+
+    while True:
+        stdscr.clear()
+        max_y, max_x = stdscr.getmaxyx()
+        safe_addstr(stdscr, 2, 2, title, ATTR_TITLE)
+        if hint:
+            safe_addstr(stdscr, 3, 2, hint[: max_x - 4], ATTR_HUD)
+
+        input_width = max(1, max_x - 8)
+        lines = wrap_text_lines(text, input_width)
+        row_start = 5
+        max_rows = max_y - row_start - 4
+        for i, line in enumerate(lines[:max_rows]):
+            safe_addstr(stdscr, row_start + i, 4, line, ATTR_SELECTED)
+
+        safe_addstr(stdscr, max_y - 3, 4, "enter save  ·  esc cancel", ATTR_HUD)
+        stdscr.refresh()
+
+        key = read_key(stdscr)
+        if is_ctrl_c(key) or is_escape(key):
+            return None
+        if is_enter(key):
+            cleaned = " ".join(text.split())
+            return cleaned if cleaned else None
+        if is_backspace(key):
+            text = text[:-1]
+        elif key is not None and len(key) == 1 and ord(key) >= 32 and not is_tab(key):
+            if len(text) < max_length:
+                text += key
+
+
+def quote_preview(text, max_len=56):
+    one_line = " ".join(text.split())
+    if len(one_line) <= max_len:
+        return one_line
+    return one_line[: max_len - 3] + "..."
+
+
+def select_category_screen(stdscr, categories, title="quotes", allow_new=True):
+    options = sorted(categories)
+    if allow_new:
+        options = options + ["new category"]
+    selected = 0
+
+    while True:
+        stdscr.clear()
+        max_y, max_x = stdscr.getmaxyx()
+        safe_addstr(stdscr, 2, max(0, (max_x - len(title)) // 2), title, ATTR_TITLE)
+        safe_addstr(stdscr, 4, 4, "select category or author", ATTR_HUD)
+
+        first_row = 6
+        visible = max(1, max_y - first_row - 4)
+        scroll = 0
+        if selected >= scroll + visible:
+            scroll = selected - visible + 1
+        elif selected < scroll:
+            scroll = selected
+
+        for i in range(visible):
+            idx = scroll + i
+            if idx >= len(options):
+                break
+            draw_menu_line(stdscr, first_row + i, options[idx], selected == idx)
+
+        safe_addstr(stdscr, max_y - 3, 4, "enter select  ·  esc back", ATTR_HUD)
+        menu_footer(stdscr)
+        stdscr.refresh()
+
+        key = read_key(stdscr)
+        if is_ctrl_c(key) or is_escape(key):
+            return None
+
+        nav = menu_next(key, selected, len(options))
+        if nav is not None:
+            selected = nav
+            continue
+
+        if not is_enter(key):
+            continue
+
+        choice = options[selected]
+        if choice == "new category":
+            name = prompt_text(stdscr, "new category", "author or list name", max_length=40)
+            if not name:
+                continue
+            return resolve_category_name(categories, name)
+        return choice
+
+
+def set_active_category(category, word_lists):
+    list_names = list(word_lists.keys())
+    if category not in list_names:
+        return
+    config["list_idx"] = list_names.index(category)
+    save_config()
+
+
+def add_quote_to_category(stdscr, word_lists, category):
+    quote = prompt_text(stdscr, "new quote", f"category: {category}", max_length=800)
+    if not quote:
+        return False
+
+    if category not in word_lists:
+        word_lists[category] = []
+
+    if quote not in word_lists[category]:
+        word_lists[category].append(quote)
+
+    save_words(word_lists)
+    set_active_category(category, word_lists)
+    return True
+
+
+def quote_detail_screen(stdscr, category, quote_idx, word_lists):
+    quotes = word_lists.get(category, [])
+    if quote_idx >= len(quotes):
+        return None
+
+    quote = quotes[quote_idx]
+    options = ["edit", "delete", "back"]
+    selected = 0
+
+    while True:
+        stdscr.clear()
+        max_y, max_x = stdscr.getmaxyx()
+        safe_addstr(stdscr, 2, 2, category, ATTR_TITLE)
+
+        lines = wrap_text_lines(quote, max(1, max_x - 8))
+        row = 4
+        for line in lines[: max_y - 12]:
+            safe_addstr(stdscr, row, 4, line, ATTR_HUD)
+            row += 1
+
+        menu_start = min(max(row + 1, 8), max_y - 6)
+        for i, opt in enumerate(options):
+            draw_menu_line(stdscr, menu_start + i, opt, selected == i)
+
+        safe_addstr(stdscr, max_y - 3, 4, "enter select  ·  esc back", ATTR_HUD)
+        menu_footer(stdscr)
+        stdscr.refresh()
+
+        key = read_key(stdscr)
+        if is_ctrl_c(key) or is_escape(key):
+            return None
+
+        nav = menu_next(key, selected, len(options))
+        if nav is not None:
+            selected = nav
+            continue
+
+        if not is_enter(key):
+            continue
+
+        if selected == 0:
+            updated = prompt_text(
+                stdscr,
+                "edit quote",
+                f"category: {category}",
+                max_length=800,
+                initial=quote,
+            )
+            if updated and updated != quote:
+                quotes[quote_idx] = updated
+                save_words(word_lists)
+            return "edited"
+
+        if selected == 1:
+            if prompt_confirm(stdscr, "delete quote?", quote_preview(quote, max_x - 8)):
+                quotes.pop(quote_idx)
+                if not quotes:
+                    del word_lists[category]
+                    list_names = list(word_lists.keys())
+                    if list_names:
+                        config["list_idx"] = min(config["list_idx"], len(list_names) - 1)
+                    else:
+                        config["list_idx"] = 0
+                    save_config()
+                save_words(word_lists)
+                return "deleted"
+            continue
+
+        return None
+
+
+def quotes_screen(stdscr, word_lists):
+    list_names = list(word_lists.keys())
+    if not list_names:
+        return
+
+    if config["list_idx"] >= len(list_names):
+        config["list_idx"] = 0
+        save_config()
+
+    category = list_names[config["list_idx"]]
+    selected = 0
+
+    while True:
+        word_lists.clear()
+        word_lists.update(load_words())
+        list_names = list(word_lists.keys())
+        if not list_names:
+            return
+        if category not in word_lists:
+            category = list_names[config["list_idx"]]
+
+        quotes = word_lists.get(category, [])
+        action_items = ["add quote", "switch category"]
+        menu_items = [f"{i + 1}. {quote_preview(q)}" for i, q in enumerate(quotes)] + action_items
+        quote_count = len(quotes)
+        add_idx = quote_count
+        switch_idx = quote_count + 1
+
+        stdscr.clear()
+        max_y, max_x = stdscr.getmaxyx()
+        safe_addstr(stdscr, 2, max(0, (max_x - len("quotes")) // 2), "quotes", ATTR_TITLE)
+        safe_addstr(stdscr, 3, 4, f"category: {category}", ATTR_HUD)
+
+        first_row = 5
+        visible = max(1, max_y - first_row - 4)
+        scroll = 0
+        if selected >= scroll + visible:
+            scroll = selected - visible + 1
+        elif selected < scroll:
+            scroll = selected
+
+        if not quotes:
+            safe_addstr(stdscr, first_row, 4, "no quotes in this category", ATTR_HUD)
+            first_row += 1
+            visible = max(1, max_y - first_row - 4)
+            scroll = 0
+            if selected >= add_idx:
+                scroll = max(0, selected - visible + 1)
+
+        for i in range(visible):
+            idx = scroll + i
+            if idx >= len(menu_items):
+                break
+            draw_menu_line(stdscr, first_row + i, menu_items[idx], selected == idx)
+
+        safe_addstr(stdscr, max_y - 3, 4, "enter select  ·  esc back", ATTR_HUD)
+        menu_footer(stdscr)
+        stdscr.refresh()
+
+        key = read_key(stdscr)
+        if is_ctrl_c(key) or is_escape(key):
+            return
+
+        nav = menu_next(key, selected, len(menu_items))
+        if nav is not None:
+            selected = nav
+            continue
+
+        if not is_enter(key):
+            continue
+
+        if selected < quote_count:
+            result = quote_detail_screen(stdscr, category, selected, word_lists)
+            if result == "deleted":
+                quotes = word_lists.get(category, [])
+                selected = min(selected, max(0, len(quotes) - 1))
+            continue
+
+        if selected == add_idx:
+            add_quote_to_category(stdscr, word_lists, category)
+            continue
+
+        if selected == switch_idx:
+            new_category = select_category_screen(
+                stdscr,
+                list(word_lists.keys()),
+                title="switch category",
+            )
+            if not new_category:
+                continue
+            if new_category not in word_lists:
+                word_lists[new_category] = []
+                save_words(word_lists)
+            category = new_category
+            set_active_category(category, word_lists)
+            selected = 0
+
+
 def danger_zone_screen(stdscr):
     options = ["restore account to default", "reset stats"]
     selected = 0
@@ -1051,6 +1360,86 @@ def draw_home_stats(stdscr, start_y, period, max_x, max_y):
     )
     safe_addstr(stdscr, y, 4, line[: max_x - 5], ATTR_HUD)
     return y + 1
+
+
+def format_stat_line(entry, max_width):
+    line = (
+        f"{entry['timestamp']}  "
+        f"{entry['wpm']} wpm  "
+        f"{entry.get('accuracy', 100)}%  "
+        f"{entry.get('list_name', '')}"
+    )
+    if len(line) > max_width:
+        return line[: max_width - 3] + "..."
+    return line
+
+
+def stats_screen(stdscr):
+    scroll = 0
+
+    while True:
+        period = STATS_PERIODS[config["stats_period_idx"]]
+        filtered = filter_stats_by_period(load_stats(), period)
+        summary = summarize_stats(filtered)
+        races = sorted(filtered, key=parse_stat_time, reverse=True)
+
+        stdscr.clear()
+        max_y, max_x = stdscr.getmaxyx()
+        safe_addstr(stdscr, 2, max(0, (max_x - len("stats")) // 2), "stats", ATTR_TITLE)
+        safe_addstr(stdscr, 3, 4, f"period: {period}", ATTR_HUD)
+
+        summary_line = (
+            f"max {summary['best']} wpm  ·  "
+            f"avg {summary['avg']} wpm  ·  "
+            f"acc {summary['avg_acc']}%"
+        )
+        safe_addstr(stdscr, 5, 4, summary_line[: max_x - 5], ATTR_HUD)
+        safe_addstr(stdscr, 7, 4, "recent races", ATTR_HUD)
+
+        first_row = 8
+        visible = max(1, max_y - first_row - 4)
+        if scroll > max(0, len(races) - visible):
+            scroll = max(0, len(races) - visible)
+
+        if not races:
+            safe_addstr(stdscr, first_row, 4, "no races in this period", ATTR_HUD)
+        else:
+            for i in range(visible):
+                idx = scroll + i
+                if idx >= len(races):
+                    break
+                safe_addstr(
+                    stdscr,
+                    first_row + i,
+                    4,
+                    format_stat_line(races[idx], max_x - 5),
+                    ATTR_HUD,
+                )
+
+        safe_addstr(stdscr, max_y - 3, 4, "left/right cycle period  ·  esc back", ATTR_HUD)
+        menu_footer(stdscr)
+        stdscr.refresh()
+
+        key = read_key(stdscr)
+        if is_ctrl_c(key) or is_escape(key):
+            return
+
+        if is_left(key) or is_right(key):
+            if is_right(key):
+                config["stats_period_idx"] = (config["stats_period_idx"] + 1) % len(STATS_PERIODS)
+            else:
+                config["stats_period_idx"] = (config["stats_period_idx"] - 1) % len(STATS_PERIODS)
+            save_config()
+            scroll = 0
+            continue
+
+        if is_up(key) and scroll > 0:
+            scroll -= 1
+            continue
+
+        if is_down(key) and scroll + visible < len(races):
+            scroll += 1
+            continue
 
 
 def draw_style_preview(stdscr, start_row, max_x):
@@ -1139,6 +1528,7 @@ def style_screen(stdscr):
 def home_screen(stdscr, word_lists):
     options = ["race", "list", "style", "settings", "stats"]
     selected = 0
+    quotes_idx = 1
     style_idx = 2
     settings_idx = 3
     stats_idx = 4
@@ -1155,19 +1545,24 @@ def home_screen(stdscr, word_lists):
         max_y, max_x = stdscr.getmaxyx()
         list_name = list_names[config["list_idx"]] if list_names else "none"
         period = STATS_PERIODS[config["stats_period_idx"]]
+        theme = THEME_NAMES[config["theme_idx"]]
 
         safe_addstr(stdscr, 2, max(0, (max_x - len("vital typing")) // 2), "vital typing", ATTR_TITLE)
 
         draw_menu_line(stdscr, 5, "race", selected == 0)
-        draw_menu_line(stdscr, 6, f"quotes: {list_name}", selected == 1)
-        draw_menu_line(stdscr, 7, "style", selected == style_idx)
+        draw_menu_line(stdscr, 6, f"quotes: {list_name}", selected == quotes_idx)
+        draw_menu_line(stdscr, 7, f"style: {theme}", selected == style_idx)
         draw_menu_line(stdscr, 8, "settings", selected == settings_idx)
         draw_menu_line(stdscr, 9, f"stats: {period}", selected == stats_idx)
 
         draw_home_stats(stdscr, 11, period, max_x, max_y)
 
-        if selected == stats_idx:
-            safe_addstr(stdscr, max_y - 3, 4, "enter change period", ATTR_HUD)
+        if selected == quotes_idx:
+            safe_addstr(stdscr, max_y - 3, 4, "enter manage  ·  left/right cycle list", ATTR_HUD)
+        elif selected == style_idx:
+            safe_addstr(stdscr, max_y - 3, 4, "enter more options  ·  left/right cycle theme", ATTR_HUD)
+        elif selected == stats_idx:
+            safe_addstr(stdscr, max_y - 3, 4, "enter more options  ·  left/right cycle period", ATTR_HUD)
 
         menu_footer(stdscr)
         stdscr.refresh()
@@ -1178,8 +1573,28 @@ def home_screen(stdscr, word_lists):
         if is_escape(key):
             return "quit"
 
-        if selected == stats_idx and is_enter(key):
-            config["stats_period_idx"] = (config["stats_period_idx"] + 1) % len(STATS_PERIODS)
+        if selected == quotes_idx and list_names and (is_left(key) or is_right(key)):
+            if is_right(key):
+                config["list_idx"] = (config["list_idx"] + 1) % len(list_names)
+            else:
+                config["list_idx"] = (config["list_idx"] - 1) % len(list_names)
+            save_config()
+            continue
+
+        if selected == style_idx and (is_left(key) or is_right(key)):
+            if is_right(key):
+                config["theme_idx"] = (config["theme_idx"] + 1) % len(THEME_NAMES)
+            else:
+                config["theme_idx"] = (config["theme_idx"] - 1) % len(THEME_NAMES)
+            save_config()
+            init_colors(stdscr)
+            continue
+
+        if selected == stats_idx and (is_left(key) or is_right(key)):
+            if is_right(key):
+                config["stats_period_idx"] = (config["stats_period_idx"] + 1) % len(STATS_PERIODS)
+            else:
+                config["stats_period_idx"] = (config["stats_period_idx"] - 1) % len(STATS_PERIODS)
             save_config()
             continue
 
@@ -1193,15 +1608,16 @@ def home_screen(stdscr, word_lists):
 
         if selected == 0:
             return "race"
-        if selected == 1:
-            config["list_idx"] = (config["list_idx"] + 1) % len(list_names)
-            save_config()
+        if selected == quotes_idx:
+            quotes_screen(stdscr, word_lists)
         elif selected == style_idx:
             style_screen(stdscr)
             init_colors(stdscr)
         elif selected == settings_idx:
             settings_screen(stdscr, word_lists)
             init_colors(stdscr)
+        elif selected == stats_idx:
+            stats_screen(stdscr)
 
 
 def results_screen(stdscr, race_result):
